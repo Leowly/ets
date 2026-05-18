@@ -4,7 +4,7 @@ import sys
 import json
 import re
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 
 
@@ -316,7 +316,34 @@ def discover_exams(root_dir):
         os.path.getmtime(os.path.join(root_dir, name))
         for _, name, _, _ in e
     ))
-    return exams
+
+    # ── 合并通道 ──
+    # 连续的非标准试卷若合并后满足标准 12 题模式，则合并为同一套。
+    merged = []
+    i = 0
+    while i < len(exams):
+        if _is_valid_exam(exams[i]):
+            merged.append(exams[i])
+            i += 1
+            continue
+
+        # 收集连续非标准组
+        combined = list(exams[i])
+        j = i + 1
+        while j < len(exams) and not _is_valid_exam(exams[j]):
+            combined.extend(exams[j])
+            j += 1
+
+        if _is_valid_exam(combined):
+            _sort_exam_order(combined)
+            merged.append(combined)
+        else:
+            for k in range(i, j):
+                merged.append(exams[k])
+
+        i = j
+
+    return merged
 
 
 def exam_summary(items, root_dir):
@@ -326,15 +353,22 @@ def exam_summary(items, root_dir):
         dates.add(datetime.fromtimestamp(os.path.getmtime(d)).strftime("%Y-%m-%d"))
 
     date_str = "/".join(sorted(dates))
-    type_counts = defaultdict(int)
+    type_question_counts = defaultdict(int)
+    total_questions = 0
     for _, _, content, _ in items:
         stype = content.get("structure_type", "?")
         label = _TYPE_NAMES.get(stype, stype)
-        type_counts[label] += 1
+        if stype == "collector.choose":
+            n = len(content["info"].get("xtlist", []))
+        else:
+            n = 1
+        type_question_counts[label] += n
+        total_questions += n
 
-    type_summary = "、".join(f"{k}×{v}" for k, v in type_counts.items())
+    type_summary = "、".join(
+        f"{k}×{v}" for k, v in type_question_counts.items())
     status = "" if _is_valid_exam(items) else " [非标准]"
-    return f"{date_str} — {len(items)} 题（{type_summary}）{status}"
+    return f"{date_str} — {total_questions} 题（{type_summary}）{status}"
 
 
 # ═══════════════════════════════════════════════════
@@ -342,11 +376,31 @@ def exam_summary(items, root_dir):
 # ═══════════════════════════════════════════════════
 
 def _is_valid_exam(items):
-    """检查是否为标准的 12 题试卷"""
+    """检查是否为标准的 12 题试卷（按题型计数匹配，不要求顺序）"""
     if len(items) != 12:
         return False
-    types = [item[2].get("structure_type", "") for item in items]
-    return types == _EXPECTED_TYPES
+    item_types = [item[2].get("structure_type", "") for item in items]
+    return Counter(item_types) == Counter(_EXPECTED_TYPES)
+
+
+# structure_type → 标准试卷中的位置序号（用于排序）
+_TYPE_ORDER = {t: i for i, t in enumerate(_EXPECTED_TYPES)}
+
+
+def _sort_exam_order(items):
+    """按标准试卷题型顺序排列（choose×5 → word×2 → read×1 →
+       dialogue×1 → picture×1 → dialogue×2），同题型先按无 passage 优先、
+      再按 stid 升序。"""
+    def sort_key(item):
+        content = item[2]
+        stype = content.get("structure_type", "")
+        type_pos = _TYPE_ORDER.get(stype, 99)
+        # 无 st_nr / value 的排在前面（Section A 短对话、快速应答等）
+        info = content.get("info", {})
+        has_passage = bool(
+            (info.get("st_nr") or info.get("value") or "").strip())
+        return (type_pos, has_passage, int(item[0]))
+    items.sort(key=sort_key)
 
 
 def build_section_map(items):
@@ -359,6 +413,7 @@ def build_section_map(items):
     items.sort(key=lambda x: int(x[0]))
 
     if _is_valid_exam(items):
+        _sort_exam_order(items)
         return {item[0]: name for item, name in zip(items, _EXAM_SECTION_NAMES)}
 
     # 非常规试卷：按 structure_type 块自动命名
@@ -407,6 +462,7 @@ def extract_exam(items, section_map, q_path, a_path):
     last_a_section = None
     counters = {}
 
+    q_count = 0
     for stid, name, content, infodata in items:
         stype = content.get("structure_type", "")
         section = section_map.get(stid, _TYPE_NAMES.get(stype, stype))
@@ -451,6 +507,12 @@ def extract_exam(items, section_map, q_path, a_path):
         else:
             q_all.append(f"[未支持题型: {stype}]")
 
+        # 统计本题的小题数
+        if stype == "collector.choose":
+            q_count += len(content["info"].get("xtlist", []))
+        else:
+            q_count += 1
+
     os.makedirs(os.path.dirname(q_path) or ".", exist_ok=True)
 
     with open(q_path, "w", encoding="utf-8") as f:
@@ -459,7 +521,7 @@ def extract_exam(items, section_map, q_path, a_path):
     with open(a_path, "w", encoding="utf-8") as f:
         f.write("\n".join(a_all).strip() + "\n")
 
-    return len(items)
+    return q_count
 
 
 # ═══════════════════════════════════════════════════
