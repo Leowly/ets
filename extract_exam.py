@@ -1,10 +1,12 @@
-"""从 ETS 原始数据中提取试卷 — 支持单/多试卷目录"""
+"""从 ETS 原始数据中提取试卷"""
 import os
 import sys
 import json
 import re
 import argparse
 from collections import defaultdict
+from datetime import datetime
+
 
 # ═══════════════════════════════════════════════════
 # 工具函数
@@ -31,16 +33,51 @@ def qnum(nr):
 
 
 # ═══════════════════════════════════════════════════
-# structure_type → 默认中文名
+# 题型名（原卷格式：Section A / Section B / 朗读句子 / 朗读段落 / 情景提问 /
+#            图片描述 / 快速应答 / 简述和回答）
 # ═══════════════════════════════════════════════════
 
-TYPE_NAMES = {
+# 标准 12 题试卷的题型序列
+_EXPECTED_TYPES = [
+    "collector.choose",
+    "collector.choose",
+    "collector.choose",
+    "collector.choose",
+    "collector.choose",
+    "collector.word",
+    "collector.word",
+    "collector.read",
+    "collector.dialogue",
+    "collector.picture",
+    "collector.dialogue",
+    "collector.dialogue",
+]
+
+# 标准 12 题试卷每道题对应的 section 名
+_EXAM_SECTION_NAMES = [
+    "Section A",
+    "Section A",
+    "Section B",
+    "Section B",
+    "Section B",
+    "朗读句子",
+    "朗读句子",
+    "朗读段落",
+    "情景提问",
+    "图片描述",
+    "快速应答",
+    "简述和回答",
+]
+
+# 非常规试卷的 fallback：structure_type → section 名
+_TYPE_NAMES = {
     "collector.choose":   "听力选择",
     "collector.word":     "朗读句子",
     "collector.read":     "朗读段落",
     "collector.dialogue": "情景对话",
     "collector.picture":  "图片描述",
 }
+
 
 # ═══════════════════════════════════════════════════
 # 各题型提取：返回 (题目, 答案)
@@ -193,12 +230,12 @@ HANDLERS = {
     "collector.picture":  do_picture,
 }
 
+
 # ═══════════════════════════════════════════════════
-# 试卷发现
+# 试卷发现 —— stid 连续 + 题型序列检测
 # ═══════════════════════════════════════════════════
 
 def _is_exam_item(dirpath):
-    """判断目录是否为题目数据目录（非 common 等辅助目录）"""
     name = os.path.basename(dirpath.rstrip("/").rstrip("\\"))
     if name in ("common",):
         return False
@@ -207,10 +244,12 @@ def _is_exam_item(dirpath):
     return os.path.exists(c2) or os.path.exists(c1)
 
 
-def discover_exams(root_dir, time_gap_hours=2):
-    """扫描 root_dir，按修改时间窗口分组，返回试卷列表。
+def discover_exams(root_dir):
+    """扫描 root_dir，按 stid 连续性与题型序列分组。
 
-    每套试卷 = [(stid, name, content, infodata), ...]
+    规则：
+    1. stid 不连续（gap > 1）→ 新试卷
+    2. 出现 collector.choose 且前面已有非 choose 题型 → 新一个 12 题试卷
     """
     entries = []
     for name in os.listdir(root_dir):
@@ -227,45 +266,60 @@ def discover_exams(root_dir, time_gap_hours=2):
         try:
             content = load_json(c2)
             infodata = load_json(info)
-            stid = content["info"].get("stid", "999999")
-            mtime = os.path.getmtime(d)
-            entries.append((mtime, stid, name, content, infodata))
+            stid = content["info"].get("stid", "0")
+            entries.append((stid, name, content, infodata))
         except Exception:
             continue
 
     if not entries:
         return []
 
-    entries.sort(key=lambda x: x[0])
+    entries.sort(key=lambda x: int(x[0]))
 
-    gap_seconds = time_gap_hours * 3600
     groups = []
-    current_group = [entries[0]]
+    current = [entries[0]]
+    has_non_choose = (
+        entries[0][2].get("structure_type", "") != "collector.choose"
+    )
 
     for i in range(1, len(entries)):
-        prev_time = entries[i - 1][0]
-        curr_time = entries[i][0]
-        if curr_time - prev_time <= gap_seconds:
-            current_group.append(entries[i])
+        prev_stid = int(entries[i - 1][0])
+        curr_stid = int(entries[i][0])
+        stype = entries[i][2].get("structure_type", "")
+
+        if curr_stid - prev_stid > 1:
+            # stid 断档 → 新试卷
+            groups.append(current)
+            current = [entries[i]]
+            has_non_choose = (stype != "collector.choose")
+        elif stype == "collector.choose" and has_non_choose:
+            # 又出现 choose 且前面已有非 choose → 12 题试卷边界
+            groups.append(current)
+            current = [entries[i]]
+            has_non_choose = False
         else:
-            groups.append(current_group)
-            current_group = [entries[i]]
-    groups.append(current_group)
+            current.append(entries[i])
+            if stype != "collector.choose":
+                has_non_choose = True
+
+    groups.append(current)
 
     exams = []
     for g in groups:
-        items = [(stid, name, content, infodata) for _, stid, name, content, infodata in g]
-        items.sort(key=lambda x: x[0])
+        items = [(stid, name, content, infodata)
+                 for stid, name, content, infodata in g]
+        items.sort(key=lambda x: int(x[0]))
         exams.append(items)
 
-    exams.sort(key=lambda e: min(os.path.getmtime(
-        os.path.join(root_dir, name)) for _, name, _, _ in e))
+    # 按最早修改时间排序
+    exams.sort(key=lambda e: min(
+        os.path.getmtime(os.path.join(root_dir, name))
+        for _, name, _, _ in e
+    ))
     return exams
 
 
 def exam_summary(items, root_dir):
-    """返回试卷的摘要信息：日期、题目数、题型分布"""
-    from datetime import datetime
     dates = set()
     for _, name, _, _ in items:
         d = os.path.join(root_dir, name)
@@ -275,31 +329,46 @@ def exam_summary(items, root_dir):
     type_counts = defaultdict(int)
     for _, _, content, _ in items:
         stype = content.get("structure_type", "?")
-        label = TYPE_NAMES.get(stype, stype)
+        label = _TYPE_NAMES.get(stype, stype)
         type_counts[label] += 1
 
     type_summary = "、".join(f"{k}×{v}" for k, v in type_counts.items())
-    return f"{date_str} — {len(items)} 题（{type_summary}）"
+    status = "" if _is_valid_exam(items) else " [非标准]"
+    return f"{date_str} — {len(items)} 题（{type_summary}）{status}"
 
 
 # ═══════════════════════════════════════════════════
-# Section 自动命名
+# Section 命名
 # ═══════════════════════════════════════════════════
+
+def _is_valid_exam(items):
+    """检查是否为标准的 12 题试卷"""
+    if len(items) != 12:
+        return False
+    types = [item[2].get("structure_type", "") for item in items]
+    return types == _EXPECTED_TYPES
+
 
 def build_section_map(items):
-    """根据 stid+structure_type 自动生成 section 名称映射。
+    """生成 section 名称映射。
 
-    同一 structure_type 的题目若 stid 不连续，则拆分为多个 section，
-    自动加序号（如 "情景对话 1", "情景对话 2"）。
+    标准 12 题试卷使用固定 section 名（Section A/B、朗读句子、
+    情景提问、图片描述、快速应答、简述和回答）。
+    非常规试卷按 structure_type + 序号自动命名。
     """
-    items.sort(key=lambda x: x[0])
+    items.sort(key=lambda x: int(x[0]))
+
+    if _is_valid_exam(items):
+        return {item[0]: name for item, name in zip(items, _EXAM_SECTION_NAMES)}
+
+    # 非常规试卷：按 structure_type 块自动命名
     section_map = {}
-    type_blocks = []  # [(type, start_idx, end_idx)]
+    type_blocks = []
 
     i = 0
     while i < len(items):
-        stid, _, content, _ = items[i]
-        stype = content.get("structure_type", "")
+        stid = items[i][0]
+        stype = items[i][2].get("structure_type", "")
         j = i + 1
         while j < len(items):
             next_stid = items[j][0]
@@ -315,9 +384,9 @@ def build_section_map(items):
         type_counters[stype] += 1
         total = sum(1 for t, _, _ in type_blocks if t == stype)
         if total > 1:
-            section_name = f"{TYPE_NAMES.get(stype, stype)} {type_counters[stype]}"
+            section_name = f"{_TYPE_NAMES.get(stype, stype)} {type_counters[stype]}"
         else:
-            section_name = TYPE_NAMES.get(stype, stype)
+            section_name = _TYPE_NAMES.get(stype, stype)
 
         for idx in range(start, end):
             stid = items[idx][0]
@@ -340,7 +409,7 @@ def extract_exam(items, section_map, q_path, a_path):
 
     for stid, name, content, infodata in items:
         stype = content.get("structure_type", "")
-        section = section_map.get(stid, TYPE_NAMES.get(stype, stype))
+        section = section_map.get(stid, _TYPE_NAMES.get(stype, stype))
         topic = content["info"].get("topic", "")
         handler = HANDLERS.get(stype)
 
@@ -398,7 +467,6 @@ def extract_exam(items, section_map, q_path, a_path):
 # ═══════════════════════════════════════════════════
 
 def _parse_selection(choice, max_n):
-    """解析用户选择，返回索引列表（0-based）"""
     choice = choice.strip().lower()
     if choice in ("all", "a"):
         return list(range(max_n))

@@ -4,9 +4,9 @@
 
 ## 功能
 
-- **自动发现试卷** — 扫描目录下的题目数据目录，按修改时间聚类分组，自动识别多套试卷
-- **多种题型支持** — 听力选择、朗读句子、朗读段落、情景对话、图片描述
-- **自动 Section 命名** — 根据题型和 stid 连续性自动生成中文 section 标题，同一题型非连续块自动加序号
+- **自动发现试卷** — 按 stid 连续性与题型序列自动分组，非标准试卷标注提示
+- **多种题型支持** — 标准试卷输出 Section A / Section B / 朗读句子 / 朗读段落 / 情景提问 / 图片描述 / 快速应答 / 简述和回答
+- **自动 Section 命名** — 标准 12 题试卷位置对应固定 section 名；非常规试卷按 structure_type + 序号自动命名
 - **批量 / 交互提取** — 支持单套、多套、全部提取，交互式或命令行模式
 
 ## 目录结构
@@ -70,17 +70,23 @@ python extract_exam.py --all --output my_results
 ## 试卷发现机制
 
 1. 扫描输入目录下所有子目录，跳过 `common` 等辅助目录
-2. 按目录修改时间排序
-3. 相邻目录修改时间差 < 2 小时的归为同一套试卷（同套试卷同时下载）
-4. 每套试卷内部按 stid 排序
-5. 按日期 + 题型分布展示摘要
+2. 读取每个题目的 stid 和 structure_type，按 stid 升序排列
+3. stid 不连续（gap > 1）→ 新试卷边界
+4. 出现 `collector.choose` 且前面已有非 choose 题型 → 新一个 12 题试卷边界
+5. 每组 12 题且题型序列匹配标准模式的为标准试卷，其他为 [非标准]
+6. 按最早修改时间排序展示
 
-## 支持题型
+## 标准试卷 Section 结构
 
-| structure_type | 题型 | 说明 |
-|---|---|---|
-| `collector.choose` | 听力选择 | 阅读理解 + 单选题 |
-| `collector.word` | 朗读句子 | 跟读句子 |
-| `collector.read` | 朗读段落 | 跟读段落 |
-| `collector.dialogue` | 情景对话 | 阅读短文 + 问答 |
-| `collector.picture` | 图片描述 | 看图说话 + 参考范文 |
+每套标准试卷共 12 题，题型序列固定，section 名对应如下：
+
+| 位置 | structure_type | Section 名 | 说明 |
+|---|---|---|---|
+| 1–2 | `collector.choose` | Section A | 短对话单选 |
+| 3–5 | `collector.choose` | Section B | 长对话 / 短文单选 |
+| 6–7 | `collector.word` | 朗读句子 | 跟读句子 |
+| 8 | `collector.read` | 朗读段落 | 朗读段落 |
+| 9 | `collector.dialogue` | 情景提问 | 阅读短文 + 提问 |
+| 10 | `collector.picture` | 图片描述 | 看图说话 + 参考范文 |
+| 11 | `collector.dialogue` | 快速应答 | 情景应答 |
+| 12 | `collector.dialogue` | 简述和回答 | 阅读短文 + 简述 |
