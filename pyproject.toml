@@ -1,7 +1,7 @@
 [project]
 name = "ets"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "从 ETS 原始数据中自动发现并提取试卷，生成纯文本试题和答案文件"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 dependencies = []
