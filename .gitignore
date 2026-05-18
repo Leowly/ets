@@ -1,0 +1,15 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+ets原始数据
+.claude
+答案.txt
+试题.txt
+resource
