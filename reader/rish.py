@@ -2,7 +2,6 @@ import json
 import os
 import posixpath
 import queue
-import re
 import shlex
 import subprocess
 import threading
@@ -153,28 +152,34 @@ class RishFileReader(FileReader):
     def get_base_path(self) -> str:
         return self.base_path
 
+    @staticmethod
+    def _store_json(temp_db, raw_path, content_text):
+        folder = posixpath.dirname(raw_path).lstrip("./")
+        filename = posixpath.basename(raw_path)
+        if filename in ("content.json", "content2.json", "info.json"):
+            try:
+                temp_db[folder][filename] = json.loads(content_text)
+            except json.JSONDecodeError:
+                pass
+
     def discover_raw_entries(self):
         """Read all exam data via rish in a single shell session.
 
-        Uses a single ``awk`` process to read every JSON file with explicit
-        per-file boundary markers.  This gives the speed of the ``grep``
-        approach (one subprocess) with the correctness of per-file ``cat``
-        (each file's content stays intact regardless of line content).
+        Uses ``head -n 999999`` which is a single POSIX process that
+        prints each file preceded by a ``==> filename <==`` header.
+        This gives single-process speed with reliable per-file boundaries
+        (the header format is POSIX-mandated for multi-file output).
         """
         print("正在通过rish连接到Shizuku获取E听说数据")
         start_time = time.time()
 
         base_dir = shlex.quote(self.base_path)
 
-        # awk is available in toybox (Android).  FNR==1 fires on the first
-        # line of each file, so we print a boundary before every file.
-        # Leading/trailing blank lines guarantee markers are at line-start
-        # even when a JSON file lacks a trailing newline.
         shell_script = f"""cd {base_dir} || exit
 echo "__TIMES__"
 stat -c '%Y %n' */ 2>/dev/null
 echo "__JSON__"
-awk 'FNR==1 {{ print ""; print "==== " FILENAME " ====" }} {{ print }}' ./*/*.json 2>/dev/null
+head -n 999999 ./*/*.json 2>/dev/null
 """
 
         raw_output = self.shell.run(shell_script, timeout=30.0)
@@ -197,25 +202,19 @@ awk 'FNR==1 {{ print ""; print "==== " FILENAME " ====" }} {{ print }}' ./*/*.js
 
         temp_db = defaultdict(dict)
 
-        file_blocks = re.split(
-            r'^====\s+(\./.+?)\s+====$',
-            raw_jsons_str,
-            flags=re.MULTILINE,
-        )
-        for i in range(1, len(file_blocks), 2):
-            if i + 1 >= len(file_blocks):
-                break
-            raw_path = file_blocks[i].strip()
-            content_text = file_blocks[i + 1]
-
-            folder = posixpath.dirname(raw_path).lstrip("./")
-            filename = posixpath.basename(raw_path)
-
-            if filename in ("content.json", "content2.json", "info.json"):
-                try:
-                    temp_db[folder][filename] = json.loads(content_text)
-                except json.JSONDecodeError:
-                    pass
+        current_path = None
+        current_lines = []
+        for line in raw_jsons_str.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("==> ") and stripped.endswith(" <=="):
+                if current_path:
+                    self._store_json(temp_db, current_path, "\n".join(current_lines))
+                current_path = stripped[4:-4].strip()
+                current_lines = []
+            elif current_path:
+                current_lines.append(line)
+        if current_path:
+            self._store_json(temp_db, current_path, "\n".join(current_lines))
 
         entries = []
         for folder, files in temp_db.items():
