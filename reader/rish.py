@@ -1,9 +1,12 @@
+import base64
+import io
 import json
 import os
 import posixpath
 import queue
 import shlex
 import subprocess
+import tarfile
 import threading
 import time
 from collections import defaultdict
@@ -152,23 +155,13 @@ class RishFileReader(FileReader):
     def get_base_path(self) -> str:
         return self.base_path
 
-    @staticmethod
-    def _store_json(temp_db, raw_path, content_text):
-        folder = posixpath.dirname(raw_path).lstrip("./")
-        filename = posixpath.basename(raw_path)
-        if filename in ("content.json", "content2.json", "info.json"):
-            try:
-                temp_db[folder][filename] = json.loads(content_text)
-            except json.JSONDecodeError:
-                pass
-
     def discover_raw_entries(self):
         """Read all exam data via rish in a single shell session.
 
-        Uses ``head -n 999999`` which is a single POSIX process that
-        prints each file preceded by a ``==> filename <==`` header.
-        This gives single-process speed with reliable per-file boundaries
-        (the header format is POSIX-mandated for multi-file output).
+        Uses ``tar -czf - | base64`` to package all JSON files into a
+        single gzipped tarball encoded as base64.  This is a binary
+        protocol — no text parsing, no boundary markers, no regex.
+        tar preserves every file boundary and byte exactly.
         """
         print("正在通过rish连接到Shizuku获取E听说数据")
         start_time = time.time()
@@ -179,7 +172,7 @@ class RishFileReader(FileReader):
 echo "__TIMES__"
 stat -c '%Y %n' */ 2>/dev/null
 echo "__JSON__"
-head -n 999999 ./*/*.json 2>/dev/null
+tar -czf - ./*/*.json 2>/dev/null | base64
 """
 
         raw_output = self.shell.run(shell_script, timeout=30.0)
@@ -202,19 +195,23 @@ head -n 999999 ./*/*.json 2>/dev/null
 
         temp_db = defaultdict(dict)
 
-        current_path = None
-        current_lines = []
-        for line in raw_jsons_str.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("==> ") and stripped.endswith(" <=="):
-                if current_path:
-                    self._store_json(temp_db, current_path, "\n".join(current_lines))
-                current_path = stripped[4:-4].strip()
-                current_lines = []
-            elif current_path:
-                current_lines.append(line)
-        if current_path:
-            self._store_json(temp_db, current_path, "\n".join(current_lines))
+        b64_data = "".join(raw_jsons_str.split())
+        tar_bytes = base64.b64decode(b64_data)
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                if not member.isfile():
+                    continue
+                folder = posixpath.dirname(member.name).lstrip("./")
+                filename = posixpath.basename(member.name)
+                if filename in ("content.json", "content2.json", "info.json"):
+                    f = tar.extractfile(member)
+                    if f:
+                        try:
+                            temp_db[folder][filename] = json.loads(
+                                f.read().decode("utf-8")
+                            )
+                        except json.JSONDecodeError:
+                            pass
 
         entries = []
         for folder, files in temp_db.items():
