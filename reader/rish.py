@@ -156,49 +156,47 @@ class RishFileReader(FileReader):
     def discover_raw_entries(self):
         """Read all exam data via rish in a single shell session.
 
-        Uses ``find`` + per-file markers for robust JSON parsing regardless
-        of formatting (compact vs pretty-printed) or line endings.
+        Uses shell globs (not ``find -maxdepth``, which toybox lacks) with
+        per-file delimiters so every JSON file arrives intact regardless of
+        formatting or line endings.
         """
         print("正在通过rish连接到Shizuku获取E听说数据")
         start_time = time.time()
 
         base_dir = shlex.quote(self.base_path)
 
-        # Use find+cat with per-file markers — far more reliable than
-        # grep line-reconstruction, which breaks on unusual whitespace,
-        # encoding, or when JSON contains colons in string values.
-        shell_script = (
-            f"cd {base_dir} || exit 1\n"
-            'echo "===MTIME==="\n'
-            r"""find . -maxdepth 1 -mindepth 1 -type d -exec stat -c '%Y %n' {} + 2>/dev/null"""
-            "\n"
-            'echo "===JSON==="\n'
-            r"""find . -maxdepth 2 -mindepth 2 \( -name content.json -o -name content2.json -o -name info.json \) -exec echo '==== {} ====' \; -exec cat {} \;"""
-        )
+        # Shell globs work on every Android shell (mksh, toybox sh, bash).
+        # ``find -maxdepth`` does NOT exist in toybox — using it silently
+        # returns zero results, which is why the find-based rewrite failed.
+        shell_script = f"""cd {base_dir} || exit
+echo "__TIMES__"
+stat -c '%Y %n' */ 2>/dev/null
+echo "__JSON__"
+for f in ./*/*.json; do
+    [ -f "$f" ] || continue
+    echo "==== $f ===="
+    cat "$f" 2>/dev/null
+done
+"""
 
         raw_output = self.shell.run(shell_script, timeout=30.0)
         fetch_time = time.time() - start_time
 
-        if "===JSON===" not in raw_output:
+        if "__JSON__" not in raw_output:
             print(f"耗时: {fetch_time:.2f}秒 — 未获取到数据\n")
             return []
 
-        # --- split mtime and JSON sections ---
-        raw_times_str, raw_jsons_str = raw_output.split("===JSON===", 1)
+        raw_times_str, raw_jsons_str = raw_output.split("__JSON__", 1)
 
         mtime_map = {}
         for line in raw_times_str.splitlines():
             line = line.strip()
-            if not line or line == "===MTIME===":
+            if not line or line == "__TIMES__":
                 continue
             parts = line.split(maxsplit=1)
             if len(parts) == 2:
-                folder = parts[1].rstrip("/")
-                if folder.startswith("./"):
-                    folder = folder[2:]
-                mtime_map[folder] = float(parts[0])
+                mtime_map[parts[1].rstrip("/")] = float(parts[0])
 
-        # --- parse per-file JSON blocks ---
         temp_db = defaultdict(dict)
 
         file_blocks = re.split(
@@ -206,7 +204,6 @@ class RishFileReader(FileReader):
             raw_jsons_str,
             flags=re.MULTILINE,
         )
-        # Blocks: [preamble, path1, content1, path2, content2, ...]
         for i in range(1, len(file_blocks), 2):
             if i + 1 >= len(file_blocks):
                 break
@@ -222,7 +219,6 @@ class RishFileReader(FileReader):
                 except json.JSONDecodeError:
                     pass
 
-        # --- build entry list ---
         entries = []
         for folder, files in temp_db.items():
             content = files.get("content2.json") or files.get("content.json")
