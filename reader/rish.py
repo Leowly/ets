@@ -124,7 +124,7 @@ class RishFileReader(FileReader):
 
     def discover_raw_entries(self):
         """Optimized: read all exam data in a single shell script (O(1) processes)."""
-        print("正在拉取底层数据快照，准备秒速解析...")
+        print("正在通过rish连接到Shizuku获取E听说数据")
         start_time = time.time()
 
         base_dir = shlex.quote(self.base_path)
@@ -182,5 +182,5 @@ grep -H -a "^" */*.json 2>/dev/null
             mtime = mtime_map.get(folder, 0.0)
             entries.append((stid, folder, content, info, mtime))
 
-        print(f"数据快照拉取耗时: {fetch_time:.2f}秒 (纯提取)，成功提取 {len(entries)} 道题目！\n")
+        print(f"耗时: {fetch_time:.2f}秒 (纯提取)，成功提取 {len(entries)} 道题目！\n")
         return entries
