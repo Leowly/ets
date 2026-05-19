@@ -175,7 +175,7 @@ echo "__JSON__"
 tar -czf - ./*/*.json 2>/dev/null | base64
 """
 
-        raw_output = self.shell.run(shell_script, timeout=30.0)
+        raw_output = self.shell.run(shell_script, timeout=120.0)
         fetch_time = time.time() - start_time
 
         if "__JSON__" not in raw_output:
@@ -196,22 +196,38 @@ tar -czf - ./*/*.json 2>/dev/null | base64
         temp_db = defaultdict(dict)
 
         b64_data = "".join(raw_jsons_str.split())
-        tar_bytes = base64.b64decode(b64_data)
-        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
-            for member in tar.getmembers():
-                if not member.isfile():
-                    continue
-                folder = posixpath.dirname(member.name).lstrip("./")
-                filename = posixpath.basename(member.name)
-                if filename in ("content.json", "content2.json", "info.json"):
-                    f = tar.extractfile(member)
-                    if f:
-                        try:
-                            temp_db[folder][filename] = json.loads(
-                                f.read().decode("utf-8")
-                            )
-                        except json.JSONDecodeError:
-                            pass
+        if not b64_data:
+            print(f"耗时: {fetch_time:.2f}秒 — base64 数据为空\n")
+            return []
+
+        # Correct padding in case output was truncated by timeout
+        b64_data += "=" * (-len(b64_data) % 4)
+
+        try:
+            tar_bytes = base64.b64decode(b64_data, validate=True)
+        except Exception as e:
+            print(f"耗时: {fetch_time:.2f}秒 — base64 解码失败: {e}\n")
+            return []
+
+        try:
+            with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+                for member in tar.getmembers():
+                    if not member.isfile():
+                        continue
+                    folder = posixpath.dirname(member.name).lstrip("./")
+                    filename = posixpath.basename(member.name)
+                    if filename in ("content.json", "content2.json", "info.json"):
+                        f = tar.extractfile(member)
+                        if f:
+                            try:
+                                temp_db[folder][filename] = json.loads(
+                                    f.read().decode("utf-8")
+                                )
+                            except json.JSONDecodeError:
+                                pass
+        except tarfile.ReadError as e:
+            print(f"耗时: {fetch_time:.2f}秒 — tar 解包失败: {e}\n")
+            return []
 
         entries = []
         for folder, files in temp_db.items():
