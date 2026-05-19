@@ -1,31 +1,80 @@
 import argparse
 import os
+import shutil
+import sys
 
 from reader.rish import PersistentRish, RishFileReader
+from reader.local import LocalFileReader
 from parser.discover import discover_exams, build_section_map, exam_summary
 from parser.extractor import extract_exam
 from utils.selector import _parse_selection
 
 DEFAULT_RISH_DIR = "/storage/emulated/0/Android/data/com.ets100.secondary/files/Download/ETS_secondary/resource"
+DEFAULT_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resource")
+
+IS_ANDROID = hasattr(sys, "getandroidapilevel")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="通过 Shizuku rish 从 ETS Android 数据目录提取试卷")
-    parser.add_argument("--dir", default=DEFAULT_RISH_DIR, help=f"Android源目录 (默认: {DEFAULT_RISH_DIR})")
-    parser.add_argument("--output", default="./result", help="输出到本地的目录 (默认: 当前目录下的 ./result)")
-    parser.add_argument("--exam", type=str, default=None, help="提取指定试卷编号（支持逗号分隔、范围、all）")
+    # ── 平台检测 & 回退 ──────────────────────────────────────────
+    if IS_ANDROID:
+        if shutil.which("rish"):
+            use_rish = True
+        elif os.path.isdir(DEFAULT_LOCAL_DIR):
+            print("[提示] 未检测到 rish，回退到本地 resource/ 目录")
+            use_rish = False
+        else:
+            print("\n[错误] 未检测到 rish，且项目目录下未找到 resource/ 文件夹。")
+            print("请选择以下方式之一提供数据：")
+            print(f"  1. 配置 Shizuku + rish，使 rish 位于 PATH 中")
+            print(f"     下载 Shizuku: https://shizuku.rikka.app/download/")
+            print(f"  2. 将 ETS 的 resource 文件夹复制到本脚本同目录下：")
+            print(f"     {DEFAULT_LOCAL_DIR}")
+            return
+    else:
+        if os.path.isdir(DEFAULT_LOCAL_DIR):
+            use_rish = False
+        else:
+            print("\n[错误] 项目目录下未找到 resource/ 文件夹。")
+            print("请选择以下方式之一提供数据：")
+            print(f"  1. 修改 main.py 中的 DEFAULT_LOCAL_DIR，指向你的 resource 目录")
+            print(f"     当前值: {DEFAULT_LOCAL_DIR}")
+            print(f"  2. 将 resource 文件夹复制到脚本同目录下")
+            return
+
+    # ── CLI ────────────────────────────────────────────────────────
+    if use_rish:
+        default_dir = DEFAULT_RISH_DIR
+        description = "通过 Shizuku rish 从 ETS Android 数据目录提取试卷"
+    else:
+        default_dir = DEFAULT_LOCAL_DIR
+        description = "从 ETS 数据目录提取试卷"
+
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--dir", default=default_dir, help=f"数据源目录 (默认: {default_dir})")
+    parser.add_argument("--output", default="./result", help="输出目录 (默认: ./result)")
+    parser.add_argument("--exam", type=str, default=None, help="提取指定试卷编号（逗号分隔、范围、all）")
     parser.add_argument("--list", action="store_true", help="仅列出可提取的试卷")
     parser.add_argument("--all", action="store_true", help="提取全部试卷")
 
     args = parser.parse_args()
 
-    shell = PersistentRish()
-    try:
+    # ── 创建 reader ─────────────────────────────────────────────────
+    if use_rish:
+        shell = PersistentRish()
         reader = RishFileReader(shell, base_path=args.dir)
+    else:
+        reader = LocalFileReader(base_path=args.dir)
+        shell = None
 
+    try:
         if not reader.exists(""):
-            print(f"\n[错误] rish 无法访问该目录: {args.dir}")
-            print("请检查包名是否正确，或者是否已授予 Shizuku 权限。")
+            if use_rish:
+                print(f"\n[错误] rish 无法访问该目录: {args.dir}")
+                print("请检查包名是否正确，或者是否已授予 Shizuku 权限。")
+            else:
+                print(f"\n[错误] 无法访问该目录: {args.dir}")
+                print("请检查路径是否正确，或使用 --dir 参数指定正确的目录。")
             return
 
         exams = discover_exams(reader)
@@ -83,7 +132,8 @@ def main():
         print(f"\n完成！共提取 {total} 题（{len(selected)} 套试卷）")
 
     finally:
-        shell.close()
+        if shell:
+            shell.close()
 
 
 if __name__ == "__main__":
