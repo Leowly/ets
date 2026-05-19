@@ -2,7 +2,7 @@ import json
 import os
 import posixpath
 import queue
-
+import re
 import shlex
 import subprocess
 import threading
@@ -156,20 +156,25 @@ class RishFileReader(FileReader):
     def discover_raw_entries(self):
         """Read all exam data via rish in a single shell session.
 
-        Uses a single ``grep`` process to read every JSON file in one shot
-        (O(1) subprocesses, not O(n) per-file ``cat`` calls), then
-        reconstructs each file by joining its ``filepath:line`` records.
+        Uses a single ``awk`` process to read every JSON file with explicit
+        per-file boundary markers.  This gives the speed of the ``grep``
+        approach (one subprocess) with the correctness of per-file ``cat``
+        (each file's content stays intact regardless of line content).
         """
         print("正在通过rish连接到Shizuku获取E听说数据")
         start_time = time.time()
 
         base_dir = shlex.quote(self.base_path)
 
+        # awk is available in toybox (Android).  FNR==1 fires on the first
+        # line of each file, so we print a boundary before every file.
+        # Leading/trailing blank lines guarantee markers are at line-start
+        # even when a JSON file lacks a trailing newline.
         shell_script = f"""cd {base_dir} || exit
 echo "__TIMES__"
 stat -c '%Y %n' */ 2>/dev/null
 echo "__JSON__"
-grep -H -a "^" */*.json 2>/dev/null
+awk 'FNR==1 {{ print ""; print "==== " FILENAME " ====" }} {{ print }}' ./*/*.json 2>/dev/null
 """
 
         raw_output = self.shell.run(shell_script, timeout=30.0)
@@ -190,24 +195,27 @@ grep -H -a "^" */*.json 2>/dev/null
             if len(parts) == 2:
                 mtime_map[parts[1].rstrip("/")] = float(parts[0])
 
-        temp_lines = defaultdict(list)
-        for line in raw_jsons_str.splitlines():
-            if ":" not in line:
-                continue
-            filepath, text = line.split(":", 1)
-            temp_lines[filepath].append(text)
-
         temp_db = defaultdict(dict)
-        for filepath, lines in temp_lines.items():
-            folder = posixpath.dirname(filepath)
-            filename = posixpath.basename(filepath)
-            if filename not in ("content.json", "content2.json", "info.json"):
-                continue
-            full_text = "\n".join(lines)
-            try:
-                temp_db[folder][filename] = json.loads(full_text)
-            except json.JSONDecodeError:
-                pass
+
+        file_blocks = re.split(
+            r'^====\s+(\./.+?)\s+====$',
+            raw_jsons_str,
+            flags=re.MULTILINE,
+        )
+        for i in range(1, len(file_blocks), 2):
+            if i + 1 >= len(file_blocks):
+                break
+            raw_path = file_blocks[i].strip()
+            content_text = file_blocks[i + 1]
+
+            folder = posixpath.dirname(raw_path).lstrip("./")
+            filename = posixpath.basename(raw_path)
+
+            if filename in ("content.json", "content2.json", "info.json"):
+                try:
+                    temp_db[folder][filename] = json.loads(content_text)
+                except json.JSONDecodeError:
+                    pass
 
         entries = []
         for folder, files in temp_db.items():
