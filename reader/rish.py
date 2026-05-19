@@ -1,4 +1,5 @@
 import json
+import os
 import posixpath
 import queue
 import re
@@ -6,7 +7,6 @@ import shlex
 import subprocess
 import threading
 import time
-import uuid
 from collections import defaultdict
 from typing import Dict, List, Optional
 
@@ -15,13 +15,16 @@ from .base import FileReader
 
 class PersistentRish:
     def __init__(self):
+        self._start_proc()
+
+    def _start_proc(self):
         self.proc = subprocess.Popen(
             ["rish"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
         )
         self.queue = queue.Queue()
         self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
@@ -35,23 +38,35 @@ class PersistentRish:
             self.queue.put(line)
 
     def _drain_queue(self):
-        """Discard any residual output left in the queue from previous commands."""
         while True:
             try:
                 self.queue.get_nowait()
             except queue.Empty:
                 break
 
+    def _ensure_alive(self):
+        if self.proc.poll() is not None:
+            self._drain_queue()
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+            self._start_proc()
+
     def run(self, command: str, timeout: float = 30.0) -> str:
-        # Drain stale output from previous command to avoid cross-contamination
+        self._ensure_alive()
         self._drain_queue()
 
-        # Unique marker per call prevents stale marker matches
-        marker = f"__RISH_END_{uuid.uuid4().hex}__"
+        marker = f"__RISH_END_{os.urandom(8).hex()}__"
         full_command = f"{command}\necho '{marker}'\n"
 
-        self.proc.stdin.write(full_command)
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(full_command)
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self._start_proc()
+            self.proc.stdin.write(full_command)
+            self.proc.stdin.flush()
 
         lines = []
         start = time.time()
@@ -62,8 +77,7 @@ class PersistentRish:
             try:
                 line = self.queue.get(timeout=0.1)
                 stripped = line.strip()
-                # Only skip exact single-char shell prompts, not data
-                if stripped in ("$", "#"):
+                if stripped in ("$", "#", ""):
                     continue
                 if marker in stripped:
                     cleaned = stripped.replace(marker, "").strip()
@@ -142,13 +156,17 @@ class RishFileReader(FileReader):
     def discover_raw_entries(self):
         """Read all exam data via rish in a single shell session.
 
-        Uses ``find`` + per-file markers for robust parsing on Android/toybox.
+        Uses ``find`` + per-file markers for robust JSON parsing regardless
+        of formatting (compact vs pretty-printed) or line endings.
         """
         print("正在通过rish连接到Shizuku获取E听说数据")
         start_time = time.time()
 
         base_dir = shlex.quote(self.base_path)
 
+        # Use find+cat with per-file markers — far more reliable than
+        # grep line-reconstruction, which breaks on unusual whitespace,
+        # encoding, or when JSON contains colons in string values.
         shell_script = (
             f"cd {base_dir} || exit 1\n"
             'echo "===MTIME==="\n'
@@ -158,10 +176,11 @@ class RishFileReader(FileReader):
             r"""find . -maxdepth 2 -mindepth 2 \( -name content.json -o -name content2.json -o -name info.json \) -exec echo '==== {} ====' \; -exec cat {} \;"""
         )
 
-        raw_output = self.shell.run(shell_script, timeout=60.0)
+        raw_output = self.shell.run(shell_script, timeout=30.0)
         fetch_time = time.time() - start_time
 
         if "===JSON===" not in raw_output:
+            print(f"耗时: {fetch_time:.2f}秒 — 未获取到数据\n")
             return []
 
         # --- split mtime and JSON sections ---
@@ -175,16 +194,13 @@ class RishFileReader(FileReader):
             parts = line.split(maxsplit=1)
             if len(parts) == 2:
                 folder = parts[1].rstrip("/")
-                # Remove leading "./" from find output
-                if folder.startswith("."):
-                    folder = folder.lstrip(".")
-                folder = folder.lstrip("/")
+                if folder.startswith("./"):
+                    folder = folder[2:]
                 mtime_map[folder] = float(parts[0])
 
         # --- parse per-file JSON blocks ---
         temp_db = defaultdict(dict)
 
-        # Split on "==== path ====" markers — text before first marker is discarded
         file_blocks = re.split(
             r'^====\s+(\./.+?)\s+====$',
             raw_jsons_str,
@@ -197,41 +213,32 @@ class RishFileReader(FileReader):
             raw_path = file_blocks[i].strip()
             content_text = file_blocks[i + 1]
 
-            # Normalise path: "./hash/filename.json"
-            filepath = raw_path.lstrip("./")
-            folder = posixpath.dirname(filepath)
-            filename = posixpath.basename(filepath)
+            folder = posixpath.dirname(raw_path).lstrip("./")
+            filename = posixpath.basename(raw_path)
 
             if filename in ("content.json", "content2.json", "info.json"):
                 try:
                     temp_db[folder][filename] = json.loads(content_text)
-                except json.JSONDecodeError as e:
-                    print(f"  [警告] JSON 解析失败: {filepath} — {e}")
+                except json.JSONDecodeError:
+                    pass
 
         # --- build entry list ---
         entries = []
-        parse_errors = 0
         for folder, files in temp_db.items():
             content = files.get("content2.json") or files.get("content.json")
             info = files.get("info.json", {})
             if not content:
-                parse_errors += 1
                 continue
             try:
                 info_obj = content.get("info", {})
                 if not info_obj:
-                    parse_errors += 1
                     continue
                 stid = str(info_obj.get("stid", "0"))
                 mtime = mtime_map.get(folder, 0.0)
                 entries.append((stid, folder, content, info, mtime))
-            except Exception as e:
-                print(f"  [警告] 题目解析失败: {folder} — {e}")
-                parse_errors += 1
+            except Exception:
+                continue
 
         elapsed = time.time() - start_time
-        parts_info = f"耗时: {elapsed:.2f}秒，成功提取 {len(entries)} 道题目"
-        if parse_errors:
-            parts_info += f"，{parse_errors} 道解析失败"
-        print(f"{parts_info}！\n")
+        print(f"耗时: {elapsed:.2f}秒，成功提取 {len(entries)} 道题目！\n")
         return entries
