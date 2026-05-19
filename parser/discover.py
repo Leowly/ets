@@ -5,6 +5,21 @@ from reader.base import FileReader
 from .types import _EXPECTED_TYPES, _EXAM_SECTION_NAMES, _TYPE_NAMES, _TYPE_ORDER
 
 
+def _safe_int(v, default=-1):
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return default
+
+
+def _stid(entry):
+    """Safely parse stid from an entry tuple; returns -1 on failure."""
+    try:
+        return int(entry[0])
+    except (ValueError, TypeError, IndexError):
+        return -1
+
+
 def discover_exams(reader: FileReader):
     """Discover and organize exams from reader data.
 
@@ -15,7 +30,7 @@ def discover_exams(reader: FileReader):
     if not entries:
         return []
 
-    entries.sort(key=lambda x: int(x[0]))
+    entries.sort(key=_stid)
 
     # --- Group entries by stid continuity and type transitions ---
     groups = []
@@ -23,8 +38,8 @@ def discover_exams(reader: FileReader):
     has_non_choose = (entries[0][2].get("structure_type", "") != "collector.choose")
 
     for i in range(1, len(entries)):
-        prev_stid = int(entries[i - 1][0])
-        curr_stid = int(entries[i][0])
+        prev_stid = _stid(entries[i - 1])
+        curr_stid = _stid(entries[i])
         stype = entries[i][2].get("structure_type", "")
 
         if curr_stid - prev_stid > 1:
@@ -44,7 +59,7 @@ def discover_exams(reader: FileReader):
 
     exams = []
     for g in groups:
-        items = sorted(g, key=lambda x: int(x[0]))
+        items = sorted(g, key=_stid)
         exams.append(items)
 
     exams.sort(key=lambda e: min(item[4] for item in e))
@@ -90,22 +105,22 @@ def _sort_exam_order(items):
         type_pos = _TYPE_ORDER.get(stype, 99)
         info = content.get("info", {})
         has_passage = bool((info.get("st_nr") or info.get("value") or "").strip())
-        return (type_pos, has_passage, int(item[0]))
+        return (type_pos, has_passage, _stid(item))
 
     items.sort(key=sort_key)
 
 
 def build_section_map(items):
-    items.sort(key=lambda x: int(x[0]))
+    _sort_exam_order(items) if _is_valid_exam(items) else items.sort(key=_stid)
     if _is_valid_exam(items):
-        _sort_exam_order(items)
         return {item[0]: name for item, name in zip(items, _EXAM_SECTION_NAMES)}
 
     section_map, type_blocks, i = {}, [], 0
     while i < len(items):
-        stid, stype = items[i][0], items[i][2].get("structure_type", "")
+        stid_str, stype = items[i][0], items[i][2].get("structure_type", "")
+        stid_num = _safe_int(stid_str)
         j = i + 1
-        while j < len(items) and items[j][2].get("structure_type", "") == stype and int(items[j][0]) == int(stid) + (j - i):
+        while j < len(items) and items[j][2].get("structure_type", "") == stype and _stid(items[j]) == stid_num + (j - i):
             j += 1
         type_blocks.append((stype, i, j))
         i = j
