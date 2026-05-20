@@ -175,7 +175,7 @@ echo "__JSON__"
 tar -czf - ./*/*.json 2>/dev/null | base64
 """
 
-        raw_output = self.shell.run(shell_script, timeout=120.0)
+        raw_output = self.shell.run(shell_script, timeout=10.0)
         fetch_time = time.time() - start_time
 
         if "__JSON__" not in raw_output:
